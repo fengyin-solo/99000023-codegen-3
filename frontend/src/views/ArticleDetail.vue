@@ -1,6 +1,46 @@
 <template>
   <div class="article-detail" v-loading="loading">
+    <div
+      v-if="article"
+      class="reading-progress-bar"
+      :style="{ width: readingProgress + '%' }"
+    ></div>
+
     <template v-if="article">
+      <el-card class="assist-card" shadow="never">
+        <template #header>
+          <div class="assist-header">
+            <span class="assist-title">阅读辅助</span>
+            <span class="assist-reading-time">预计阅读约 {{ readingTime }} 分钟</span>
+          </div>
+        </template>
+
+        <div class="assist-block">
+          <div class="assist-label">内容概览</div>
+          <template v-if="outlineItems.length">
+            <ul class="assist-outline">
+              <li
+                v-for="(item, index) in outlineItems"
+                :key="index"
+                :style="{ paddingLeft: (Math.min(item.level, 6) - 1) * 14 + 'px' }"
+              >
+                {{ item.text }}
+              </li>
+            </ul>
+            <div v-if="outlineTotal > outlineItems.length" class="assist-more">
+              … 共 {{ outlineTotal }} 个章节
+            </div>
+          </template>
+          <div v-else-if="excerpt" class="assist-excerpt">{{ excerpt }}</div>
+          <div v-else class="assist-empty">本文暂无正文内容</div>
+        </div>
+
+        <div class="assist-block">
+          <div class="assist-label">当前阅读进度</div>
+          <el-progress :percentage="readingProgress" :stroke-width="10" />
+        </div>
+      </el-card>
+
       <el-card>
         <template #header>
           <div class="article-header">
@@ -20,10 +60,10 @@
             </div>
           </div>
         </template>
-        
+
         <div class="article-content" v-html="renderedContent"></div>
       </el-card>
-      
+
       <div class="back-button">
         <el-button @click="goBack">
           <el-icon><ArrowLeft /></el-icon>
@@ -31,23 +71,25 @@
         </el-button>
       </div>
     </template>
-    
+
     <el-empty v-if="!loading && !article" description="文章不存在" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { marked } from 'marked'
 import api from '../api'
+import { extractOutline, buildExcerpt, estimateReadingTime } from '../utils/readingAssist'
 
 const route = useRoute()
 const router = useRouter()
 
 const article = ref(null)
 const loading = ref(false)
+const readingProgress = ref(0)
 
 // Configure marked
 marked.setOptions({
@@ -57,24 +99,74 @@ marked.setOptions({
 
 const renderedContent = computed(() => {
   if (!article.value) return ''
-  return marked(article.value.body)
+  return marked(article.value.body || '')
 })
+
+const articleBody = computed(() => (article.value && article.value.body) || '')
+
+const outline = computed(() => extractOutline(articleBody.value))
+const outlineItems = computed(() => outline.value.items)
+const outlineTotal = computed(() => outline.value.total)
+const excerpt = computed(() => buildExcerpt(articleBody.value))
+const readingTime = computed(() => estimateReadingTime(articleBody.value))
 
 onMounted(() => {
   fetchArticle()
+  window.addEventListener('scroll', handleScroll, { passive: true })
+  window.addEventListener('resize', handleScroll, { passive: true })
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('scroll', handleScroll)
+  window.removeEventListener('resize', handleScroll)
+})
+
+// 同一路由组件切换文章（/article/:id 参数变化）时重新加载，
+// 保证概览与进度始终对应当前文章
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    fetchArticle()
+  }
 })
 
 async function fetchArticle() {
   loading.value = true
+  article.value = null
+  readingProgress.value = 0
+  window.scrollTo({ top: 0 })
   try {
     const { id } = route.params
     const response = await api.get(`/articles/${id}`)
     article.value = response.data
+    await nextTick()
+    updateProgress()
   } catch (error) {
     console.error('Failed to fetch article:', error)
   } finally {
     loading.value = false
   }
+}
+
+let scrollTicking = false
+function handleScroll() {
+  if (scrollTicking) return
+  scrollTicking = true
+  window.requestAnimationFrame(() => {
+    updateProgress()
+    scrollTicking = false
+  })
+}
+
+function updateProgress() {
+  const scrollTop = window.scrollY || document.documentElement.scrollTop || 0
+  const scrollable = document.documentElement.scrollHeight - window.innerHeight
+  if (scrollable <= 0) {
+    // 内容不足一屏时视为已读完全部
+    readingProgress.value = 100
+    return
+  }
+  const percent = Math.round((scrollTop / scrollable) * 100)
+  readingProgress.value = Math.min(100, Math.max(0, percent))
 }
 
 function goBack() {
@@ -96,6 +188,78 @@ function formatDate(dateStr) {
   max-width: 800px;
   margin: 0 auto;
   padding-top: 20px;
+}
+
+.reading-progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  background-color: #409eff;
+  z-index: 1000;
+  transition: width 0.1s linear;
+}
+
+.assist-card {
+  margin-bottom: 20px;
+}
+
+.assist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.assist-title {
+  font-weight: bold;
+  color: #303133;
+}
+
+.assist-reading-time {
+  color: #909399;
+  font-size: 14px;
+}
+
+.assist-block + .assist-block {
+  margin-top: 16px;
+}
+
+.assist-label {
+  font-size: 14px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.assist-outline {
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.assist-outline li {
+  font-size: 14px;
+  color: #606266;
+  line-height: 1.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assist-more {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
+}
+
+.assist-excerpt {
+  font-size: 14px;
+  color: #606266;
+  line-height: 1.6;
+}
+
+.assist-empty {
+  font-size: 14px;
+  color: #909399;
 }
 
 .article-header {
